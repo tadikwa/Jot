@@ -1831,6 +1831,18 @@ fn engine_label(model_id: &str) -> String {
             "rejected: a degree (not necessarily…) was lost",
             "refusé : un degré (pas forcément…) a disparu",
         ),
+        ("rejected", "pending_lost") => ui(
+            "rejected: a pending status (not yet…) was lost",
+            "refusé : un état en attente (pas encore…) a disparu",
+        ),
+        ("rejected", "condition_lost") => ui(
+            "rejected: an « if » was lost",
+            "refusé : un « si » a disparu",
+        ),
+        ("rejected", "name_changed") => ui(
+            "rejected: a name was changed (Notepad++…)",
+            "refusé : un nom a été modifié (Notepad++…)",
+        ),
         ("rejected", _) => ui("rejected by the safety check", "refusé par le contrôle"),
         ("missing", _) => ui("not installed", "non installé"),
         ("timeout", _) => ui("too slow (time limit reached)", "trop lent (délai dépassé)"),
@@ -1982,6 +1994,9 @@ mod tests {
             "rejected/hedge_lost",
             "rejected/negation_lost",
             "rejected/number_changed",
+            "rejected/pending_lost",
+            "rejected/condition_lost",
+            "rejected/name_changed",
             "timeout",
             "startfail",
             "error",
