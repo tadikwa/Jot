@@ -1959,4 +1959,32 @@ mod tests {
         });
         file_layout::set_override_root(None);
     }
+
+    /// Replays a History export (`dictations.jsonl`, kept off the repository)
+    /// through today's gate: which accepted local rewrites it would now refuse.
+    /// Prints ids and reasons only, never the text: `JOT_AUDIT_JSONL=<file>
+    /// cargo test -p jot-core --lib fidelity_audit_replay -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "reads a private local export"]
+    fn fidelity_audit_replay() {
+        let path = std::env::var("JOT_AUDIT_JSONL").expect("JOT_AUDIT_JSONL");
+        for line in std::fs::read_to_string(path).unwrap().lines() {
+            let d: serde_json::Value = serde_json::from_str(line).unwrap();
+            let model = d["modelId"].as_str().unwrap_or_default();
+            let (Some(raw), Some(cleaned)) =
+                (d["rawTranscript"].as_str(), d["cleanedTranscript"].as_str())
+            else {
+                continue;
+            };
+            // Accepted local rewrites only: a refusal inserted the raw text.
+            if !model.starts_with("local/") || !model.contains('+') || model.contains(':') {
+                continue;
+            }
+            let id = &d["id"].as_str().unwrap_or_default()[..8];
+            match reformulation_verdict(raw, cleaned) {
+                Ok(()) => println!("AUDIT {id} accepted"),
+                Err(reason) => println!("AUDIT {id} refused {reason}"),
+            }
+        }
+    }
 }
