@@ -36,7 +36,7 @@ pub fn check(raw: &str, cleaned: &str) -> Result<(), &'static str> {
     if !flipped_negations(raw, cleaned).is_empty() {
         return Err("negation_lost");
     }
-    if PENDING.is_match(&normalized(raw)) && !PENDING.is_match(&normalized(cleaned)) {
+    if pending_lost(raw, cleaned) {
         return Err("pending_lost");
     }
     if kept_negation(raw)
@@ -304,6 +304,32 @@ fn affirmed(t: &Words, x: &str, y: &str) -> usize {
         .count()
 }
 
+/// « pas encore envoyé » rewritten « envoyé » (f9d3ea95). The status may be
+/// reworded (« pas encore confirmé » → « non confirmé », bench c-long-450) as
+/// long as a word it governs stays negated.
+fn pending_lost(raw: &str, cleaned: &str) -> bool {
+    if !PENDING.is_match(&normalized(raw)) || PENDING.is_match(&normalized(cleaned)) {
+        return false;
+    }
+    let (r, c) = (Words::new(raw), Words::new(cleaned));
+    let negated = |x: &str| {
+        (0..c.w.len()).any(|j| {
+            stem(&c.w[j]) == x
+                && (j.saturating_sub(3)..j)
+                    .any(|k| c.sentence[k] == c.sentence[j] && c.is(k, NEGATING))
+        })
+    };
+    let pending = |p: usize| {
+        (r.is(p, &["pas"]) && r.is(p + 1, &["encore"]))
+            || (r.is(p, &["toujours"]) && r.is(p + 1, &["pas"]))
+            || (r.is(p, &["not"]) && (p + 1..r.w.len().min(p + 5)).any(|i| r.w[i] == "yet"))
+    };
+    (0..r.w.len()).filter(|&p| pending(p)).any(|p| {
+        !(p + 1..r.w.len().min(p + 6))
+            .any(|i| r.sentence[i] == r.sentence[p] && r.content(i).is_some_and(negated))
+    })
+}
+
 /// A negation said and not taken back, for the presence check.
 fn kept_negation(raw: &str) -> bool {
     let r = Words::new(raw);
@@ -324,7 +350,8 @@ fn lost_numbers(raw: &str, cleaned: &str) -> Vec<String> {
     // a quantity: its 2 is allowed in the output, not required.
     // 0 and 1 are mostly articles (« un switch » → « le switch »).
     let kept = numbers(cleaned);
-    let mut lost: Vec<String> = numbers(&COLON.replace_all(raw, " : "))
+    let required = ENUMERATION.replace_all(raw, "$1");
+    let mut lost: Vec<String> = numbers(&COLON.replace_all(&required, " : "))
         .into_iter()
         .filter(|n| *n > 1 && !kept.contains(n) && !taken_back.contains(n))
         .map(|n| n.to_string())
@@ -615,6 +642,11 @@ static RETRACTED_QUALIFIER: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 static COLON: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\bdeux[- ]points?\b").unwrap());
+// « Deuxième sujet, le budget » opening a sentence numbers the speech, like a
+// list marker: a rewrite into a list may drop it (bench c-long-450).
+static ENUMERATION: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(^|[.!?…]\s+)(?:deuxième|troisième|quatrième|cinquième|sixième|septième|huitième|neuvième|dixième)\b").unwrap()
+});
 static LIST_MARKER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)^\s*\d+[.)]\s").unwrap());
 static HEDGE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)peut-être|peut être|\bje pense\b|\bje crois\b|sais pas|pas sûr|pas certain|probablement|sans doute|il me semble|j'imagine|\bi think\b|\bmaybe\b|not sure|n't know|\bprobably\b|\bperhaps\b|\bi guess\b").unwrap()
@@ -1345,6 +1377,23 @@ mod tests {
             check("We haven't shipped it yet.", "We shipped it."),
             Err("pending_lost")
         );
+        // Reworded, still negated: the status survives.
+        for (raw, kept) in [
+            (
+                "Le déménagement, ce n'est pas encore complètement confirmé.",
+                "Déménagement non confirmé.",
+            ),
+            ("We haven't shipped it yet.", "It is not shipped."),
+        ] {
+            assert_eq!(check(raw, kept), Ok(()), "{kept}");
+        }
+        assert_eq!(
+            check(
+                "Le déménagement, ce n'est pas encore complètement confirmé.",
+                "Déménagement confirmé."
+            ),
+            Err("pending_lost")
+        );
         assert_eq!(
             check(
                 "We haven't shipped the fix yet. The build is not green.",
@@ -1420,6 +1469,27 @@ mod tests {
         ] {
             assert_eq!(check(raw, cleaned), Ok(()), "{cleaned}");
         }
+    }
+
+    #[test]
+    fn rex_nov_2026_an_enumeration_ordinal_may_go() {
+        let raw = "Premier sujet, le planning. Deuxième sujet, le recrutement de deux personnes.";
+        assert_eq!(
+            check(raw, "- Planning.\n- Recrutement de deux personnes."),
+            Ok(())
+        );
+        assert_eq!(
+            check(raw, "- Planning.\n- Recrutement."),
+            Err("number_lost")
+        );
+        // Inside a sentence the ordinal is a fact.
+        assert_eq!(
+            check(
+                "Le bureau est au deuxième étage.",
+                "Le bureau est à l'étage."
+            ),
+            Err("number_lost")
+        );
     }
 
     #[test]
@@ -1574,13 +1644,13 @@ mod tests {
             ),
             Ok(())
         );
-        // d3187fa0: the last quantity wins, the cheese is dropped.
-        let shopping = "Pour samedi, il faudrait acheter deux bouteilles d'eau, trois pommes, du fromage, une baguette et quatre yaourts. Ah non, finalement pas de fromage, j'en ai encore. Et pour les pommes, je me suis trompé, il en faut cinq, pas trois. Ajoute aussi du café.";
+        // d3187fa0: the last quantity wins, the dropped item goes.
+        let picnic = "Pour le pique-nique, il faudrait prendre deux nappes, trois thermos, des chaises, un parasol et quatre gobelets. Ah non, finalement pas de chaises, on en a déjà. Et pour les thermos, je me suis trompée, il en faut cinq, pas trois. Prends aussi du sel.";
         for cleaned in [
-            "Pour samedi :\n- Deux bouteilles d'eau.\n- Cinq pommes.\n- Une baguette.\n- Quatre yaourts.\n- Du café.",
-            "Pour samedi :\n- Deux bouteilles d'eau.\n- Cinq pommes.\n- Une baguette.\n- Quatre yaourts.\n- Du café.\n\nPas de fromage, il en reste.",
+            "Pour le pique-nique :\n- Deux nappes.\n- Cinq thermos.\n- Un parasol.\n- Quatre gobelets.\n- Du sel.",
+            "Pour le pique-nique :\n- Deux nappes.\n- Cinq thermos.\n- Un parasol.\n- Quatre gobelets.\n- Du sel.\n\nPas de chaises, il y en a déjà.",
         ] {
-            assert_eq!(check(shopping, cleaned), Ok(()), "{cleaned}");
+            assert_eq!(check(picnic, cleaned), Ok(()), "{cleaned}");
         }
         // « ce n'est pas mille deux cents, c'est mille quatre cents »: 1200 is taken back.
         assert_eq!(
@@ -1593,8 +1663,8 @@ mod tests {
         // The retracted quantity must not come back as the last word.
         assert_eq!(
             check(
-                shopping,
-                "Pour samedi :\n- Deux bouteilles d'eau.\n- Trois pommes.\n- Une baguette.\n- Quatre yaourts.\n- Du café."
+                picnic,
+                "Pour le pique-nique :\n- Deux nappes.\n- Trois thermos.\n- Un parasol.\n- Quatre gobelets.\n- Du sel."
             ),
             Err("number_lost")
         );
@@ -1711,15 +1781,9 @@ mod bench_references {
         }
         assert_eq!(total, 125);
         // Known strictness since numbers are only excused near a correction:
-        // c-long-450 is a bullet summary that drops « deuxième/troisième sujet »,
-        // d-long-retour-produit drops the closing recap « deux ou trois soucis ».
-        // A rewrite like either falls back to the raw text, which stays faithful.
-        assert_eq!(
-            refused,
-            [
-                "\"c-long-450\" number_lost",
-                "\"d-long-retour-produit\" number_lost"
-            ]
-        );
+        // d-long-retour-produit drops the closing recap « deux ou trois soucis »,
+        // which 1.7.1 also refused whenever no correction word was dictated.
+        // A rewrite like it falls back to the raw text, which stays faithful.
+        assert_eq!(refused, ["\"d-long-retour-produit\" number_lost"]);
     }
 }
